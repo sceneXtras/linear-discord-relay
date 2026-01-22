@@ -13,11 +13,5 @@
         "attempts": 10
       }
     ]
-  },
-  "cron": [
-    {
-      "command": "wget -q -O - http://localhost:8080/report/by-user",
-      "schedule": "0 9 * * 1-5"
-    }
-  ]
+  }
 }
