@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  digest:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - LINEAR_API_KEY=${LINEAR_API_KEY}
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL}
+      - MODE=server
+      - PORT=8080
+      - TZ=UTC
+    restart: unless-stopped

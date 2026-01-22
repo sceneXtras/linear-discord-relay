@@ -1,0 +1,17 @@
+{
+  "name": "linear-daily-digest",
+  "description": "Linear to Discord daily digest and webhook bridge",
+  "healthchecks": {
+    "web": [
+      {
+        "type": "startup",
+        "name": "web check",
+        "path": "/health",
+        "timeout": 5,
+        "interval": 10,
+        "wait": 5,
+        "attempts": 10
+      }
+    ]
+  }
+}

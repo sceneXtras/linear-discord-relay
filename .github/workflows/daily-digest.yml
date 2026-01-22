@@ -1,0 +1,47 @@
+name: Daily Linear Digest
+
+on:
+  schedule:
+    # Run at 9 AM UTC every weekday (Mon-Fri)
+    - cron: '0 9 * * 1-5'
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  send-digest:
+    name: Send Daily Digest to Discord
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Trigger digest via deployed service
+        run: |
+          HTTP_STATUS=$(curl -s -o response.txt -w "%{http_code}" \
+            -X POST "https://communication-relay.scenextras.com/report")
+
+          echo "Response status: $HTTP_STATUS"
+          cat response.txt
+
+          if [ "$HTTP_STATUS" = "200" ]; then
+            echo "✅ Daily digest sent successfully!"
+          else
+            echo "❌ Failed to send daily digest"
+            exit 1
+          fi
+
+      - name: Notify on failure
+        if: failure()
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          if [ -n "$DISCORD_WEBHOOK_URL" ]; then
+            curl -X POST "$DISCORD_WEBHOOK_URL" \
+              -H "Content-Type: application/json" \
+              -d '{
+                "embeds": [{
+                  "title": "❌ Daily Digest Failed",
+                  "description": "Failed to generate daily Linear digest.\n\nCheck the service logs at communication-relay.scenextras.com",
+                  "color": 15158332,
+                  "timestamp": "'$(date -u +%Y-%m-%dT%H:%M:%S.000Z)'"
+                }]
+              }'
+          fi

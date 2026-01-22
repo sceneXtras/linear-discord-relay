@@ -1,0 +1,1 @@
+web: ./linear-daily-digest

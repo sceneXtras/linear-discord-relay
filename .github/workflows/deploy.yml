@@ -1,0 +1,82 @@
+name: Deploy to Dokku
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Deploy to communication-relay.scenextras.com
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: scenextras
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DOKKU_TEST_SSH_KEY }}
+
+      - name: Add Dokku host to known_hosts
+        run: ssh-keyscan -H dokku-scenextras.eastus.cloudapp.azure.com >> ~/.ssh/known_hosts
+
+      - name: Deploy to Dokku
+        run: |
+          git remote add dokku dokku@dokku-scenextras.eastus.cloudapp.azure.com:linear-daily-digest || true
+          git push dokku main:main --force
+
+      - name: Verify deployment
+        run: |
+          echo "Waiting for deployment to complete..."
+          sleep 30
+
+          # Health check
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://communication-relay.scenextras.com/health || echo "000")
+
+          if [ "$HTTP_STATUS" = "200" ]; then
+            echo "✅ Deployment successful! Health check passed."
+          else
+            echo "⚠️ Health check returned status: $HTTP_STATUS"
+            echo "Checking Dokku logs..."
+            ssh dokku@dokku-scenextras.eastus.cloudapp.azure.com "dokku logs linear-daily-digest --num 50" || true
+            exit 1
+          fi
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          if [ -n "${{ secrets.DISCORD_WEBHOOK_URL }}" ]; then
+            curl -X POST "${{ secrets.DISCORD_WEBHOOK_URL }}" \
+              -H "Content-Type: application/json" \
+              -d '{
+                "embeds": [{
+                  "title": "❌ Linear Daily Digest Deployment Failed",
+                  "description": "Deployment failed in GitHub Actions\n\nCommit: ${{ github.sha }}\nBranch: ${{ github.ref_name }}\nActor: ${{ github.actor }}",
+                  "color": 15158332,
+                  "timestamp": "'$(date -u +%Y-%m-%dT%H:%M:%S.000Z)'"
+                }]
+              }'
+          fi
+
+      - name: Notify on success
+        if: success()
+        run: |
+          if [ -n "${{ secrets.DISCORD_WEBHOOK_URL }}" ]; then
+            curl -X POST "${{ secrets.DISCORD_WEBHOOK_URL }}" \
+              -H "Content-Type: application/json" \
+              -d '{
+                "embeds": [{
+                  "title": "✅ Linear Daily Digest Deployed",
+                  "description": "Successfully deployed to communication-relay.scenextras.com\n\nCommit: ${{ github.sha }}\nBranch: ${{ github.ref_name }}\nActor: ${{ github.actor }}",
+                  "color": 3066993,
+                  "timestamp": "'$(date -u +%Y-%m-%dT%H:%M:%S.000Z)'"
+                }]
+              }'
+          fi
