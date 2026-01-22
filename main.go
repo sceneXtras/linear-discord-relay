@@ -15,7 +15,10 @@ import (
 
 const linearAPIURL = "https://api.linear.app/graphql"
 
-// Linear GraphQL types
+// ============================================================================
+// LINEAR TYPES
+// ============================================================================
+
 type GraphQLRequest struct {
 	Query     string                 `json:"query"`
 	Variables map[string]interface{} `json:"variables,omitempty"`
@@ -46,6 +49,7 @@ type Issue struct {
 	ID            string    `json:"id"`
 	Identifier    string    `json:"identifier"`
 	Title         string    `json:"title"`
+	Description   string    `json:"description,omitempty"`
 	Priority      int       `json:"priority"`
 	PriorityLabel string    `json:"priorityLabel"`
 	URL           string    `json:"url"`
@@ -85,7 +89,54 @@ type Label struct {
 	Color string `json:"color"`
 }
 
-// Discord types
+// Linear Webhook types
+type LinearWebhook struct {
+	Action       string          `json:"action"`
+	Actor        *User           `json:"actor,omitempty"`
+	CreatedAt    string          `json:"createdAt"`
+	Data         json.RawMessage `json:"data"`
+	Type         string          `json:"type"`
+	URL          string          `json:"url,omitempty"`
+	UpdatedFrom  json.RawMessage `json:"updatedFrom,omitempty"`
+	WebhookID    string          `json:"webhookId,omitempty"`
+	WebhookTS    int64           `json:"webhookTimestamp,omitempty"`
+}
+
+type LinearWebhookIssue struct {
+	ID            string  `json:"id"`
+	Identifier    string  `json:"identifier"`
+	Title         string  `json:"title"`
+	Description   string  `json:"description,omitempty"`
+	Priority      int     `json:"priority"`
+	PriorityLabel string  `json:"priorityLabel,omitempty"`
+	State         *State  `json:"state,omitempty"`
+	Assignee      *User   `json:"assignee,omitempty"`
+	Team          *Team   `json:"team,omitempty"`
+	Labels        []Label `json:"labels,omitempty"`
+	URL           string  `json:"url,omitempty"`
+}
+
+type LinearWebhookComment struct {
+	ID        string              `json:"id"`
+	Body      string              `json:"body"`
+	Issue     *LinearWebhookIssue `json:"issue,omitempty"`
+	User      *User               `json:"user,omitempty"`
+	CreatedAt string              `json:"createdAt,omitempty"`
+	URL       string              `json:"url,omitempty"`
+}
+
+type LinearWebhookProject struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	State       string `json:"state,omitempty"`
+	URL         string `json:"url,omitempty"`
+}
+
+// ============================================================================
+// DISCORD TYPES
+// ============================================================================
+
 type DiscordWebhook struct {
 	Content   string         `json:"content,omitempty"`
 	Username  string         `json:"username,omitempty"`
@@ -100,11 +151,18 @@ type DiscordEmbed struct {
 	Color       int            `json:"color,omitempty"`
 	Timestamp   string         `json:"timestamp,omitempty"`
 	Footer      *DiscordFooter `json:"footer,omitempty"`
+	Author      *DiscordAuthor `json:"author,omitempty"`
 	Fields      []DiscordField `json:"fields,omitempty"`
 }
 
 type DiscordFooter struct {
 	Text    string `json:"text,omitempty"`
+	IconURL string `json:"icon_url,omitempty"`
+}
+
+type DiscordAuthor struct {
+	Name    string `json:"name,omitempty"`
+	URL     string `json:"url,omitempty"`
 	IconURL string `json:"icon_url,omitempty"`
 }
 
@@ -116,51 +174,65 @@ type DiscordField struct {
 
 // Colors
 const (
-	ColorBlue   = 0x5E6AD2
-	ColorGreen  = 0x22C55E
-	ColorYellow = 0xEAB308
-	ColorRed    = 0xEF4444
-	ColorGray   = 0x6B7280
-	ColorPurple = 0x8B5CF6
+	ColorBlue   = 0x5E6AD2 // Linear brand color
+	ColorGreen  = 0x22C55E // Success/Done
+	ColorYellow = 0xEAB308 // Warning/In Progress
+	ColorRed    = 0xEF4444 // Error/Urgent
+	ColorGray   = 0x6B7280 // Neutral
+	ColorPurple = 0x8B5CF6 // Comments
 )
+
+const linearAvatarURL = "https://asset.brandfetch.io/ideiLNHwrW/id_xq4rBdb.png"
 
 var (
 	linearAPIKey      string
 	discordWebhookURL string
 )
 
-func main() {
-	linearAPIKey = os.Getenv("LINEAR_API_KEY")
-	if linearAPIKey == "" {
-		log.Fatal("LINEAR_API_KEY environment variable is required")
-	}
+// ============================================================================
+// MAIN
+// ============================================================================
 
+func main() {
 	discordWebhookURL = os.Getenv("DISCORD_WEBHOOK_URL")
 	if discordWebhookURL == "" {
 		log.Fatal("DISCORD_WEBHOOK_URL environment variable is required")
 	}
 
-	// Check if running as server or one-shot (default: server for deployment)
-	mode := os.Getenv("MODE")
-	if mode == "" {
-		mode = "server" // Default to server mode for Dokku deployment
+	// LINEAR_API_KEY is optional - only needed for daily digest
+	linearAPIKey = os.Getenv("LINEAR_API_KEY")
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
 	}
-	if mode == "server" {
-		port := os.Getenv("PORT")
-		if port == "" {
-			port = "8080"
-		}
-		http.HandleFunc("/report", handleReport)
-		http.HandleFunc("/health", handleHealth)
-		log.Printf("Linear Daily Digest server listening on port %s", port)
-		log.Fatal(http.ListenAndServe(":"+port, nil))
-	} else {
-		// One-shot mode - run report and exit
-		if err := generateAndSendReport(); err != nil {
-			log.Fatalf("Failed to generate report: %v", err)
-		}
-		log.Println("Report sent successfully")
+
+	// Routes
+	http.HandleFunc("/health", handleHealth)
+	http.HandleFunc("/webhook", handleLinearWebhook)     // Linear → Discord relay
+	http.HandleFunc("/report", handleReport)             // Daily digest
+	http.HandleFunc("/", handleRoot)
+
+	log.Printf("Linear-Discord Communication Relay listening on port %s", port)
+	log.Printf("Endpoints: /webhook (Linear relay), /report (daily digest), /health")
+	log.Fatal(http.ListenAndServe(":"+port, nil))
+}
+
+func handleRoot(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
 	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"service": "Linear-Discord Communication Relay",
+		"version": "1.0.0",
+		"endpoints": map[string]string{
+			"/webhook": "POST - Receive Linear webhooks and forward to Discord",
+			"/report":  "GET/POST - Generate and send daily digest",
+			"/health":  "GET - Health check",
+		},
+	})
 }
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -168,12 +240,292 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
+// ============================================================================
+// WEBHOOK RELAY (Linear → Discord)
+// ============================================================================
+
+func handleLinearWebhook(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		log.Printf("Error reading body: %v", err)
+		http.Error(w, "Error reading request", http.StatusBadRequest)
+		return
+	}
+	defer r.Body.Close()
+
+	log.Printf("Received Linear webhook: %s", string(body))
+
+	var webhook LinearWebhook
+	if err := json.Unmarshal(body, &webhook); err != nil {
+		log.Printf("Error parsing webhook: %v", err)
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	discordPayload, err := transformWebhookToDiscord(webhook)
+	if err != nil {
+		log.Printf("Error transforming webhook: %v", err)
+		http.Error(w, "Error processing webhook", http.StatusInternalServerError)
+		return
+	}
+
+	if discordPayload == nil {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	if err := sendToDiscord(discordPayload); err != nil {
+		log.Printf("Error sending to Discord: %v", err)
+		http.Error(w, "Error forwarding to Discord", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "forwarded"})
+}
+
+func transformWebhookToDiscord(webhook LinearWebhook) (*DiscordWebhook, error) {
+	switch webhook.Type {
+	case "Issue":
+		return transformIssueWebhook(webhook)
+	case "Comment":
+		return transformCommentWebhook(webhook)
+	case "Project":
+		return transformProjectWebhook(webhook)
+	default:
+		log.Printf("Unhandled webhook type: %s", webhook.Type)
+		return nil, nil
+	}
+}
+
+func transformIssueWebhook(webhook LinearWebhook) (*DiscordWebhook, error) {
+	var issue LinearWebhookIssue
+	if err := json.Unmarshal(webhook.Data, &issue); err != nil {
+		return nil, fmt.Errorf("failed to parse issue data: %w", err)
+	}
+
+	var title, emoji string
+	color := ColorBlue
+
+	switch webhook.Action {
+	case "create":
+		emoji = "🎯"
+		title = "New Issue Created"
+		color = ColorBlue
+	case "update":
+		emoji = "📝"
+		title = "Issue Updated"
+		color = ColorYellow
+	case "remove":
+		emoji = "🗑️"
+		title = "Issue Removed"
+		color = ColorRed
+	default:
+		emoji = "📋"
+		title = fmt.Sprintf("Issue %s", strings.Title(webhook.Action))
+	}
+
+	description := truncate(issue.Description, 300)
+	if description == "" {
+		description = "*No description*"
+	}
+
+	embed := DiscordEmbed{
+		Title:       fmt.Sprintf("%s %s", emoji, title),
+		Description: fmt.Sprintf("**[%s](%s)** - %s\n\n%s", issue.Identifier, issue.URL, issue.Title, description),
+		URL:         issue.URL,
+		Color:       color,
+		Timestamp:   time.Now().UTC().Format(time.RFC3339),
+		Fields:      []DiscordField{},
+	}
+
+	if issue.State != nil {
+		embed.Fields = append(embed.Fields, DiscordField{
+			Name:   "Status",
+			Value:  fmt.Sprintf("%s %s", getStateEmoji(issue.State.Type), issue.State.Name),
+			Inline: true,
+		})
+	}
+
+	if issue.PriorityLabel != "" {
+		embed.Fields = append(embed.Fields, DiscordField{
+			Name:   "Priority",
+			Value:  fmt.Sprintf("%s %s", getPriorityEmoji(issue.Priority), issue.PriorityLabel),
+			Inline: true,
+		})
+	}
+
+	if issue.Assignee != nil {
+		embed.Fields = append(embed.Fields, DiscordField{
+			Name:   "Assignee",
+			Value:  fmt.Sprintf("👤 %s", issue.Assignee.Name),
+			Inline: true,
+		})
+	}
+
+	if issue.Team != nil {
+		embed.Fields = append(embed.Fields, DiscordField{
+			Name:   "Team",
+			Value:  fmt.Sprintf("👥 %s", issue.Team.Name),
+			Inline: true,
+		})
+	}
+
+	if len(issue.Labels) > 0 {
+		labelNames := make([]string, len(issue.Labels))
+		for i, label := range issue.Labels {
+			labelNames[i] = fmt.Sprintf("`%s`", label.Name)
+		}
+		embed.Fields = append(embed.Fields, DiscordField{
+			Name:   "Labels",
+			Value:  strings.Join(labelNames, " "),
+			Inline: false,
+		})
+	}
+
+	if webhook.Actor != nil {
+		embed.Footer = &DiscordFooter{Text: fmt.Sprintf("by %s", webhook.Actor.Name)}
+	}
+
+	return &DiscordWebhook{
+		Username:  "Linear",
+		AvatarURL: linearAvatarURL,
+		Embeds:    []DiscordEmbed{embed},
+	}, nil
+}
+
+func transformCommentWebhook(webhook LinearWebhook) (*DiscordWebhook, error) {
+	var comment LinearWebhookComment
+	if err := json.Unmarshal(webhook.Data, &comment); err != nil {
+		return nil, fmt.Errorf("failed to parse comment data: %w", err)
+	}
+
+	var title, emoji string
+
+	switch webhook.Action {
+	case "create":
+		emoji = "💬"
+		title = "New Comment"
+	case "update":
+		emoji = "✏️"
+		title = "Comment Updated"
+	case "remove":
+		emoji = "🗑️"
+		title = "Comment Removed"
+	default:
+		emoji = "💬"
+		title = fmt.Sprintf("Comment %s", strings.Title(webhook.Action))
+	}
+
+	issueInfo := ""
+	if comment.Issue != nil {
+		issueInfo = fmt.Sprintf("**[%s](%s)** - %s", comment.Issue.Identifier, comment.Issue.URL, comment.Issue.Title)
+	}
+
+	embed := DiscordEmbed{
+		Title:       fmt.Sprintf("%s %s", emoji, title),
+		Description: fmt.Sprintf("%s\n\n>>> %s", issueInfo, truncate(comment.Body, 500)),
+		URL:         comment.URL,
+		Color:       ColorPurple,
+		Timestamp:   time.Now().UTC().Format(time.RFC3339),
+	}
+
+	if comment.User != nil {
+		embed.Author = &DiscordAuthor{Name: comment.User.Name}
+	}
+
+	if webhook.Actor != nil {
+		embed.Footer = &DiscordFooter{Text: fmt.Sprintf("by %s", webhook.Actor.Name)}
+	}
+
+	return &DiscordWebhook{
+		Username:  "Linear",
+		AvatarURL: linearAvatarURL,
+		Embeds:    []DiscordEmbed{embed},
+	}, nil
+}
+
+func transformProjectWebhook(webhook LinearWebhook) (*DiscordWebhook, error) {
+	var project LinearWebhookProject
+	if err := json.Unmarshal(webhook.Data, &project); err != nil {
+		return nil, fmt.Errorf("failed to parse project data: %w", err)
+	}
+
+	var title, emoji string
+	color := ColorBlue
+
+	switch webhook.Action {
+	case "create":
+		emoji = "🚀"
+		title = "New Project Created"
+		color = ColorGreen
+	case "update":
+		emoji = "📊"
+		title = "Project Updated"
+		color = ColorYellow
+	case "remove":
+		emoji = "🗑️"
+		title = "Project Removed"
+		color = ColorRed
+	default:
+		emoji = "📁"
+		title = fmt.Sprintf("Project %s", strings.Title(webhook.Action))
+	}
+
+	description := truncate(project.Description, 300)
+	if description == "" {
+		description = "*No description*"
+	}
+
+	embed := DiscordEmbed{
+		Title:       fmt.Sprintf("%s %s", emoji, title),
+		Description: fmt.Sprintf("**%s**\n\n%s", project.Name, description),
+		URL:         project.URL,
+		Color:       color,
+		Timestamp:   time.Now().UTC().Format(time.RFC3339),
+		Fields:      []DiscordField{},
+	}
+
+	if project.State != "" {
+		embed.Fields = append(embed.Fields, DiscordField{
+			Name:   "State",
+			Value:  project.State,
+			Inline: true,
+		})
+	}
+
+	if webhook.Actor != nil {
+		embed.Footer = &DiscordFooter{Text: fmt.Sprintf("by %s", webhook.Actor.Name)}
+	}
+
+	return &DiscordWebhook{
+		Username:  "Linear",
+		AvatarURL: linearAvatarURL,
+		Embeds:    []DiscordEmbed{embed},
+	}, nil
+}
+
+// ============================================================================
+// DAILY DIGEST
+// ============================================================================
+
 func handleReport(w http.ResponseWriter, r *http.Request) {
+	if linearAPIKey == "" {
+		http.Error(w, "LINEAR_API_KEY not configured", http.StatusServiceUnavailable)
+		return
+	}
+
 	if err := generateAndSendReport(); err != nil {
 		log.Printf("Error generating report: %v", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "report_sent"})
 }
@@ -191,13 +543,9 @@ func generateAndSendReport() error {
 		return sendNoIssuesReport()
 	}
 
-	// Group by status
 	byStatus := groupByStatus(issues)
-
-	// Group by assignee
 	byAssignee := groupByAssignee(issues)
 
-	// Send report
 	return sendReport(issues, byStatus, byAssignee)
 }
 
@@ -285,10 +633,7 @@ func fetchAllOpenIssues() ([]Issue, error) {
 }
 
 func executeGraphQL(query string, variables map[string]interface{}) (json.RawMessage, error) {
-	reqBody := GraphQLRequest{
-		Query:     query,
-		Variables: variables,
-	}
+	reqBody := GraphQLRequest{Query: query, Variables: variables}
 
 	jsonBody, err := json.Marshal(reqBody)
 	if err != nil {
@@ -359,7 +704,6 @@ func groupByStatus(issues []Issue) []StatusGroup {
 		groups[key].Issues = append(groups[key].Issues, issue)
 	}
 
-	// Convert to slice and sort by status type priority
 	result := make([]StatusGroup, 0, len(groups))
 	for _, g := range groups {
 		result = append(result, *g)
@@ -400,22 +744,17 @@ func groupByAssignee(issues []Issue) []AssigneeGroup {
 		}
 
 		if groups[name] == nil {
-			groups[name] = &AssigneeGroup{
-				Name:   name,
-				Issues: []Issue{},
-			}
+			groups[name] = &AssigneeGroup{Name: name, Issues: []Issue{}}
 		}
 		groups[name].Issues = append(groups[name].Issues, issue)
 	}
 
-	// Convert to slice and sort by issue count (most issues first)
 	result := make([]AssigneeGroup, 0, len(groups))
 	for _, g := range groups {
 		result = append(result, *g)
 	}
 
 	sort.Slice(result, func(i, j int) bool {
-		// Unassigned always last
 		if result[i].Name == "Unassigned" {
 			return false
 		}
@@ -431,23 +770,20 @@ func groupByAssignee(issues []Issue) []AssigneeGroup {
 func sendNoIssuesReport() error {
 	embed := DiscordEmbed{
 		Title:       "📊 Linear Daily Digest",
-		Description: "No open issues found. Great job keeping the backlog clean!",
+		Description: "No open issues found. Great job keeping the backlog clean! 🎉",
 		Color:       ColorGreen,
 		Timestamp:   time.Now().UTC().Format(time.RFC3339),
-		Footer: &DiscordFooter{
-			Text: "Linear Daily Digest",
-		},
+		Footer:      &DiscordFooter{Text: "Linear Daily Digest"},
 	}
 
 	return sendToDiscord(&DiscordWebhook{
 		Username:  "Linear Daily Digest",
-		AvatarURL: "https://asset.brandfetch.io/ideiLNHwrW/id_xq4rBdb.png",
+		AvatarURL: linearAvatarURL,
 		Embeds:    []DiscordEmbed{embed},
 	})
 }
 
 func sendReport(issues []Issue, byStatus []StatusGroup, byAssignee []AssigneeGroup) error {
-	// Calculate stats
 	urgentCount := 0
 	highCount := 0
 	for _, issue := range issues {
@@ -458,14 +794,11 @@ func sendReport(issues []Issue, byStatus []StatusGroup, byAssignee []AssigneeGro
 		}
 	}
 
-	// Build status summary
 	var statusLines []string
 	for _, group := range byStatus {
-		emoji := getStateEmoji(group.Type)
-		statusLines = append(statusLines, fmt.Sprintf("%s **%s**: %d", emoji, group.Name, len(group.Issues)))
+		statusLines = append(statusLines, fmt.Sprintf("%s **%s**: %d", getStateEmoji(group.Type), group.Name, len(group.Issues)))
 	}
 
-	// Build assignee summary
 	var assigneeLines []string
 	for _, group := range byAssignee {
 		emoji := "👤"
@@ -475,7 +808,6 @@ func sendReport(issues []Issue, byStatus []StatusGroup, byAssignee []AssigneeGro
 		assigneeLines = append(assigneeLines, fmt.Sprintf("%s **%s**: %d", emoji, group.Name, len(group.Issues)))
 	}
 
-	// Build priority alerts
 	var priorityAlerts []string
 	if urgentCount > 0 {
 		priorityAlerts = append(priorityAlerts, fmt.Sprintf("🔴 **%d Urgent**", urgentCount))
@@ -484,46 +816,32 @@ func sendReport(issues []Issue, byStatus []StatusGroup, byAssignee []AssigneeGro
 		priorityAlerts = append(priorityAlerts, fmt.Sprintf("🟠 **%d High Priority**", highCount))
 	}
 
-	// Create main embed
 	mainEmbed := DiscordEmbed{
 		Title:     "📊 Linear Daily Digest",
 		Color:     ColorBlue,
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
-		Footer: &DiscordFooter{
-			Text: fmt.Sprintf("Total: %d open issues • Generated at", len(issues)),
-		},
-		Fields: []DiscordField{},
+		Footer:    &DiscordFooter{Text: fmt.Sprintf("Total: %d open issues • Generated at", len(issues))},
+		Fields:    []DiscordField{},
 	}
 
-	// Add summary description
 	summaryParts := []string{fmt.Sprintf("**%d** open issues across your workspace", len(issues))}
 	if len(priorityAlerts) > 0 {
 		summaryParts = append(summaryParts, strings.Join(priorityAlerts, " | "))
 	}
 	mainEmbed.Description = strings.Join(summaryParts, "\n")
 
-	// Add status breakdown
-	mainEmbed.Fields = append(mainEmbed.Fields, DiscordField{
-		Name:   "📋 By Status",
-		Value:  strings.Join(statusLines, "\n"),
-		Inline: true,
-	})
-
-	// Add assignee breakdown
-	mainEmbed.Fields = append(mainEmbed.Fields, DiscordField{
-		Name:   "👥 By Assignee",
-		Value:  strings.Join(assigneeLines, "\n"),
-		Inline: true,
-	})
+	mainEmbed.Fields = append(mainEmbed.Fields,
+		DiscordField{Name: "📋 By Status", Value: strings.Join(statusLines, "\n"), Inline: true},
+		DiscordField{Name: "👥 By Assignee", Value: strings.Join(assigneeLines, "\n"), Inline: true},
+	)
 
 	embeds := []DiscordEmbed{mainEmbed}
 
-	// Add urgent/high priority issues detail (if any)
 	if urgentCount > 0 || highCount > 0 {
 		var priorityIssues []string
 		count := 0
 		for _, issue := range issues {
-			if issue.Priority <= 2 && count < 10 { // Top 10 urgent/high
+			if issue.Priority <= 2 && count < 10 {
 				emoji := "🔴"
 				if issue.Priority == 2 {
 					emoji = "🟠"
@@ -539,16 +857,14 @@ func sendReport(issues []Issue, byStatus []StatusGroup, byAssignee []AssigneeGro
 		}
 
 		if len(priorityIssues) > 0 {
-			priorityEmbed := DiscordEmbed{
+			embeds = append(embeds, DiscordEmbed{
 				Title:       "🚨 Priority Issues",
 				Description: strings.Join(priorityIssues, "\n"),
 				Color:       ColorRed,
-			}
-			embeds = append(embeds, priorityEmbed)
+			})
 		}
 	}
 
-	// Add recent activity (issues updated today)
 	today := time.Now().Truncate(24 * time.Hour)
 	var recentIssues []string
 	for _, issue := range issues {
@@ -559,20 +875,23 @@ func sendReport(issues []Issue, byStatus []StatusGroup, byAssignee []AssigneeGro
 	}
 
 	if len(recentIssues) > 0 {
-		recentEmbed := DiscordEmbed{
+		embeds = append(embeds, DiscordEmbed{
 			Title:       "🔄 Recently Updated",
 			Description: strings.Join(recentIssues, "\n"),
 			Color:       ColorYellow,
-		}
-		embeds = append(embeds, recentEmbed)
+		})
 	}
 
 	return sendToDiscord(&DiscordWebhook{
 		Username:  "Linear Daily Digest",
-		AvatarURL: "https://asset.brandfetch.io/ideiLNHwrW/id_xq4rBdb.png",
+		AvatarURL: linearAvatarURL,
 		Embeds:    embeds,
 	})
 }
+
+// ============================================================================
+// HELPERS
+// ============================================================================
 
 func sendToDiscord(payload *DiscordWebhook) error {
 	jsonData, err := json.Marshal(payload)
@@ -618,5 +937,22 @@ func getStateEmoji(stateType string) string {
 		return "❌"
 	default:
 		return "📋"
+	}
+}
+
+func getPriorityEmoji(priority int) string {
+	switch priority {
+	case 0:
+		return "⬜"
+	case 1:
+		return "🔴"
+	case 2:
+		return "🟠"
+	case 3:
+		return "🟡"
+	case 4:
+		return "🟢"
+	default:
+		return "⬜"
 	}
 }
