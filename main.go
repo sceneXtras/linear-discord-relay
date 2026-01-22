@@ -207,15 +207,19 @@ func main() {
 		port = "8080"
 	}
 
+	// Start internal scheduler for daily reports (9 AM UTC, Mon-Fri)
+	go startDailyScheduler()
+
 	// Routes
 	http.HandleFunc("/health", handleHealth)
-	http.HandleFunc("/webhook", handleLinearWebhook)     // Linear → Discord relay
-	http.HandleFunc("/report", handleReport)             // Daily digest summary
+	http.HandleFunc("/webhook", handleLinearWebhook)       // Linear → Discord relay
+	http.HandleFunc("/report", handleReport)               // Daily digest summary
 	http.HandleFunc("/report/by-user", handleReportByUser) // Detailed per-user report
 	http.HandleFunc("/", handleRoot)
 
 	log.Printf("Linear-Discord Communication Relay listening on port %s", port)
 	log.Printf("Endpoints: /webhook (Linear relay), /report (daily digest), /health")
+	log.Printf("Daily report scheduled: 9:00 AM UTC, Monday-Friday")
 	log.Fatal(http.ListenAndServe(":"+port, nil))
 }
 
@@ -982,6 +986,65 @@ func generateUserTasksReport() error {
 	}
 
 	return nil
+}
+
+// ============================================================================
+// INTERNAL SCHEDULER (9 AM UTC, Mon-Fri)
+// ============================================================================
+
+func startDailyScheduler() {
+	if linearAPIKey == "" {
+		log.Println("Scheduler: LINEAR_API_KEY not set, daily reports disabled")
+		return
+	}
+
+	log.Println("Scheduler: Started daily report scheduler (9:00 AM UTC, Mon-Fri)")
+
+	for {
+		now := time.Now().UTC()
+		next := nextScheduledTime(now)
+		duration := next.Sub(now)
+
+		log.Printf("Scheduler: Next report at %s (in %s)", next.Format(time.RFC3339), duration.Round(time.Minute))
+
+		time.Sleep(duration)
+
+		// Double-check it's a weekday (in case of drift)
+		if isWeekday(time.Now().UTC()) {
+			log.Println("Scheduler: Triggering daily per-user report")
+			if err := generateUserTasksReport(); err != nil {
+				log.Printf("Scheduler: Error generating report: %v", err)
+			} else {
+				log.Println("Scheduler: Daily report sent successfully")
+			}
+		}
+	}
+}
+
+func nextScheduledTime(now time.Time) time.Time {
+	// Target: 9:00 AM UTC
+	targetHour := 9
+	targetMinute := 0
+
+	// Start with today at 9 AM
+	next := time.Date(now.Year(), now.Month(), now.Day(), targetHour, targetMinute, 0, 0, time.UTC)
+
+	// If we've passed today's time, move to tomorrow
+	if now.After(next) {
+		next = next.Add(24 * time.Hour)
+	}
+
+	// Skip weekends (Saturday=6, Sunday=0)
+	for !isWeekday(next) {
+		next = next.Add(24 * time.Hour)
+	}
+
+	return next
+}
+
+func isWeekday(t time.Time) bool {
+	day := t.Weekday()
+	return day >= time.Monday && day <= time.Friday
 }
 
 // ============================================================================
