@@ -210,7 +210,8 @@ func main() {
 	// Routes
 	http.HandleFunc("/health", handleHealth)
 	http.HandleFunc("/webhook", handleLinearWebhook)     // Linear → Discord relay
-	http.HandleFunc("/report", handleReport)             // Daily digest
+	http.HandleFunc("/report", handleReport)             // Daily digest summary
+	http.HandleFunc("/report/by-user", handleReportByUser) // Detailed per-user report
 	http.HandleFunc("/", handleRoot)
 
 	log.Printf("Linear-Discord Communication Relay listening on port %s", port)
@@ -887,6 +888,100 @@ func sendReport(issues []Issue, byStatus []StatusGroup, byAssignee []AssigneeGro
 		AvatarURL: linearAvatarURL,
 		Embeds:    embeds,
 	})
+}
+
+// ============================================================================
+// PER-USER REPORT
+// ============================================================================
+
+func handleReportByUser(w http.ResponseWriter, r *http.Request) {
+	if linearAPIKey == "" {
+		http.Error(w, "LINEAR_API_KEY not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	if err := generateUserTasksReport(); err != nil {
+		log.Printf("Error generating user report: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "user_report_sent"})
+}
+
+func generateUserTasksReport() error {
+	log.Println("Fetching issues for per-user report...")
+	issues, err := fetchAllOpenIssues()
+	if err != nil {
+		return fmt.Errorf("failed to fetch issues: %w", err)
+	}
+
+	if len(issues) == 0 {
+		return sendNoIssuesReport()
+	}
+
+	byAssignee := groupByAssignee(issues)
+
+	// Send one embed per user (Discord limit: 10 embeds per message)
+	var embeds []DiscordEmbed
+
+	// Header embed
+	embeds = append(embeds, DiscordEmbed{
+		Title:       "📋 Open Tasks by User",
+		Description: fmt.Sprintf("**%d** open tasks across **%d** assignees", len(issues), len(byAssignee)),
+		Color:       ColorBlue,
+		Timestamp:   time.Now().UTC().Format(time.RFC3339),
+	})
+
+	// Per-user embeds
+	for _, group := range byAssignee {
+		var taskLines []string
+		for i, issue := range group.Issues {
+			if i >= 15 { // Limit to 15 tasks per user
+				taskLines = append(taskLines, fmt.Sprintf("*... and %d more*", len(group.Issues)-15))
+				break
+			}
+			priorityEmoji := getPriorityEmoji(issue.Priority)
+			taskLines = append(taskLines, fmt.Sprintf("%s [%s](%s) - %s",
+				priorityEmoji, issue.Identifier, issue.URL, truncate(issue.Title, 50)))
+		}
+
+		emoji := "👤"
+		if group.Name == "Unassigned" {
+			emoji = "❓"
+		}
+
+		embeds = append(embeds, DiscordEmbed{
+			Title:       fmt.Sprintf("%s %s (%d tasks)", emoji, group.Name, len(group.Issues)),
+			Description: strings.Join(taskLines, "\n"),
+			Color:       ColorGray,
+		})
+
+		// Discord limit: 10 embeds per message, send in batches
+		if len(embeds) >= 10 {
+			if err := sendToDiscord(&DiscordWebhook{
+				Username:  "Linear Task Report",
+				AvatarURL: linearAvatarURL,
+				Embeds:    embeds,
+			}); err != nil {
+				return err
+			}
+			embeds = nil
+			time.Sleep(500 * time.Millisecond) // Rate limit
+		}
+	}
+
+	// Send remaining embeds
+	if len(embeds) > 0 {
+		return sendToDiscord(&DiscordWebhook{
+			Username:  "Linear Task Report",
+			AvatarURL: linearAvatarURL,
+			Embeds:    embeds,
+		})
+	}
+
+	return nil
 }
 
 // ============================================================================
